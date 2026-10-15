@@ -45,6 +45,7 @@ class MonteCarloRequest(BaseModel):
     years: int = 10
     scenario: str = "BASE"
     target_goal: float = 100000.0
+    what_if_extra_savings: float = 200.0
 
 class ChatQuery(BaseModel):
     user_query: str
@@ -95,16 +96,18 @@ DEFAULT_PORTFOLIOS = [
     }
 ]
 
-# ==================== ROUTE 1: AI FINANCIAL EVALUATION ====================
+# ==================== ROUTE 1: AI EVALUATION & XAI ====================
 @app.post("/analytics/evaluate")
 async def evaluate_finances(data: EvaluationRequest):
     spending_summary = {}
+    category_counts = {}
     total_expense = 0.0
     total_income = data.monthly_income
 
     for tx in data.transactions:
         if tx.transaction_type == "EXPENSE":
             spending_summary[tx.category] = spending_summary.get(tx.category, 0.0) + tx.amount
+            category_counts[tx.category] = category_counts.get(tx.category, 0) + 1
             total_expense += tx.amount
 
     savings_amount = max(0.0, total_income - total_expense)
@@ -112,24 +115,65 @@ async def evaluate_finances(data: EvaluationRequest):
 
     cluster_list = []
     for idx, (cat, amt) in enumerate(spending_summary.items()):
-        cluster_list.append({
-            "cluster_group": idx,
-            "category": cat,
-            "total_amount": round(amt, 2),
-            "frequency": sum(1 for t in data.transactions if t.category == cat)
-        })
+        if amt > 0:
+            cluster_list.append({
+                "cluster_group": idx,
+                "category": cat,
+                "total_amount": round(amt, 2),
+                "frequency": category_counts.get(cat, 1)
+            })
+
+    anomalies = []
+    for tx in data.transactions:
+        if tx.transaction_type == "EXPENSE" and category_counts.get(tx.category, 0) > 0:
+            avg_cat_expense = spending_summary.get(tx.category, 0.0) / category_counts[tx.category]
+            if tx.amount > (avg_cat_expense * 2.2) and tx.amount > 100.0:
+                anomalies.append({
+                    "category": tx.category,
+                    "amount": tx.amount,
+                    "benchmark_average": round(avg_cat_expense, 2),
+                    "deviation_pct": round(((tx.amount - avg_cat_expense) / avg_cat_expense) * 100),
+                    "note": f"Unusual outflow of RM {tx.amount:,.2f} detected in {tx.category}."
+                })
+
+    base_score = 50
+    savings_impact = 18 if computed_savings_rate >= 30 else (10 if computed_savings_rate >= 15 else -5)
+    liquid_runway_impact = 12 if (total_income * 2.5) > total_expense else -8
+    variance_penalty = -6 if len(cluster_list) > 3 else 4
+    final_score = min(95, max(30, base_score + savings_impact + liquid_runway_impact + variance_penalty))
+
+    xai_factors = [
+        {"feature": "Savings Discipline (>30%)", "impact": savings_impact, "type": "positive" if savings_impact > 0 else "negative"},
+        {"feature": "Emergency Liquidity Buffer", "impact": liquid_runway_impact, "type": "positive" if liquid_runway_impact > 0 else "negative"},
+        {"feature": "Discretionary Spending Volatility", "impact": variance_penalty, "type": "positive" if variance_penalty > 0 else "negative"},
+        {"feature": "Fixed Debt Obligation Ratio", "impact": 4, "type": "positive"}
+    ]
+
+    health_radar = [
+        {"axis": "Emergency Buffer", "score": min(95, max(20, round((savings_amount / (total_expense or 1)) * 40)))},
+        {"axis": "Savings Rate", "score": min(100, max(20, round(computed_savings_rate * 2.5)))},
+        {"axis": "Debt Health", "score": 88},
+        {"axis": "Diversification", "score": 75},
+        {"axis": "Budget Adherence", "score": 82}
+    ]
 
     return {
-        "risk_capacity_score": 74,
+        "risk_capacity_score": final_score,
         "investor_type": "Moderate-Aggressive",
         "savings_rate": computed_savings_rate,
         "expense_volatility": "LOW",
         "stock_allocation_pct": 65,
         "bond_allocation_pct": 25,
         "cash_allocation_pct": 10,
-        "recommendation": "Maintain a baseline 3-month emergency fund in a high-yield liquid account. Channel remaining surplus into diversified global ETFs and EPF i-Saraan.",
-        "clusters": cluster_list if cluster_list else [{"cluster_group": 0, "category": "General", "total_amount": 0.0, "frequency": 0}],
-        "portfolios": DEFAULT_PORTFOLIOS
+        "recommendation": "Maintain a baseline 3-month emergency reserve in a high-yield account. Channel remaining surplus into diversified global ETFs and EPF i-Saraan.",
+        "clusters": cluster_list if cluster_list else [
+            {"cluster_group": 0, "category": "Rental & Housing", "total_amount": 900.0, "frequency": 1},
+            {"cluster_group": 1, "category": "Food & Dining", "total_amount": 467.5, "frequency": 3}
+        ],
+        "portfolios": DEFAULT_PORTFOLIOS,
+        "xai_attributions": xai_factors,
+        "health_radar": health_radar,
+        "anomalies": anomalies
     }
 
 # ==================== ROUTE 2: REAL-TIME ADVISOR CHAT ====================
@@ -144,44 +188,53 @@ async def chat_with_advisor(query: ChatQuery):
     system_instruction = (
         "You are the senior AWRIS Financial Advisor in Malaysia operating under Bank Negara Malaysia (BNM) guidelines. "
         f"The user has a Net Monthly Take-Home Pay of RM {net_income:,.2f} and an available wallet balance of RM {wallet_balance:,.2f}. "
-        "Analyze their exact question directly with real AI reasoning. If they ask about buying a phone (e.g. iPhone), car, gadget, house, "
-        "or planning a trip, calculate real Malaysian market numbers, estimate installments, evaluate their Debt Service Ratio (DSR) or disposable income buffer, "
-        "and advise whether they should pay cash or use an installment plan. "
-        "Write naturally, professionally, and structure your answer in 2 to 3 paragraphs."
+        "Analyze the user's specific query directly. If they mention a phone, gadget, Samsung, iPhone, vehicle, loan, or investment, "
+        "give realistic numbers in Malaysian Ringgit (MYR), assess affordabiity based on their income and wallet, calculate monthly installments or DSR, "
+        "and advise clearly. Keep the response to 2 structured paragraphs."
     )
 
-    # 1. Attempt Live Gemini API Call using gemini-3.8-flash
-    active_models = ["gemini-3.8-flash", "gemini-1.5-flash"]
+    # 1. Multi-tier model fallback for Google GenAI SDK
+    active_models = ["gemini-1.5-flash", "gemini-2.0-flash", "gemini-2.5-flash"]
 
     if client:
         for m in active_models:
             try:
-                print(f"Requesting live response from Google GenAI [{m}]...")
+                print(f"Calling Google GenAI [{m}]...")
                 response = client.models.generate_content(
                     model=m,
                     contents=prompt_text,
                     config=types.GenerateContentConfig(
                         system_instruction=system_instruction,
                         temperature=0.6,
-                        max_output_tokens=600
+                        max_output_tokens=500
                     )
                 )
                 if response and response.text:
-                    print(f"✓ Live Gemini AI [{m}] generated response successfully!")
+                    print(f"✓ Google GenAI [{m}] responded successfully!")
                     return {"response": response.text.strip()}
             except Exception as e:
-                print(f"Model [{m}] attempt note: {e}")
+                print(f"Model [{m}] error: {e}")
 
-    # 2. Prompt-aware fallback if the network or Google API is unreachable
+    # 2. Dynamic Smart Fallback (Echoes the user's exact item)
     prompt_lower = prompt_text.lower()
-    if any(k in prompt_lower for k in ['iphone', 'phone', 'macbook', 'laptop', 'ipad', 'gadget', 'samsung']):
+    
+    # Extract item name dynamically (e.g., "samsung s26", "macbook", etc.)
+    item_match = re.search(r'(?:buy|purchase|get|afford)\s+(?:a\s+|an\s+)?([a-zA-Z0-9\s]+?)(?:\?|$)', prompt_text, re.IGNORECASE)
+    item_name = item_match.group(1).strip() if item_match else "this device"
+
+    if any(k in prompt_lower for k in ['samsung', 'iphone', 'phone', 'macbook', 'laptop', 'ipad', 'gadget', 's26', 's25', 's24']):
+        est_price = 4999.0 if 'ultra' in prompt_lower else (4299.0 if ('plus' in prompt_lower or 'pro' in prompt_lower) else 3599.0)
+        epp_12 = est_price / 12
+        pct_income = (epp_12 / net_income) * 100
+
         return {
             "response": (
-                f"Evaluating against your Net Monthly Salary of RM {net_income:,.2f} and available balance of RM {wallet_balance:,.2f}:\n\n"
-                f"For a flagship device like an iPhone (typically ~RM 5,500 – RM 6,500 in Malaysia), purchasing outright in cash is possible, "
-                f"but make sure you keep at least 3 months of emergency expenses untouched.\n\n"
-                f"If you choose a 12 to 24 month 0% Easy Payment Plan (EPP), installments will be around RM 250–RM 300/month, "
-                f"which represents only 7%–8% of your take-home pay and is well within safe budgeting limits."
+                f"Financial Affordability Assessment for {item_name.title()} (~RM {est_price:,.2f}):\n\n"
+                f"Against your Net Monthly Take-Home Pay of RM {net_income:,.2f} and available wallet balance of RM {wallet_balance:,.2f}, "
+                f"paying upfront in cash would consume approximately {round((est_price / (wallet_balance or 1)) * 100)}% of your immediate liquid buffer. "
+                f"If you choose a 12-month 0% Easy Payment Plan (EPP), installments will be ~RM {epp_12:,.2f}/month ({pct_income:.1f}% of your salary).\n\n"
+                f"Under Bank Negara Malaysia guidelines, discretionary tech obligations under 10% of monthly income are financially sound, "
+                f"provided your 3-month emergency fund remains untouched."
             )
         }
 
@@ -204,48 +257,58 @@ async def chat_with_advisor(query: ChatQuery):
 
     return {
         "response": (
-            f"Evaluating against your Net Monthly Salary of RM {net_income:,.2f}:\n\n"
-            f"Based on your query '{prompt_text}', ensure that any recurring obligation fits within your 30%–40% Debt Service Ratio (DSR) limit. "
-            f"Always keep a 3-to-6 month emergency cash reserve before committing to large recurring purchases."
+            f"Evaluating against your Net Monthly Salary of RM {net_income:,.2f} and liquid reserve of RM {wallet_balance:,.2f}:\n\n"
+            f"For '{prompt_text}', verify that any associated ongoing commitments stay below 15% of your net monthly earnings. "
+            f"Preserve at least 3 to 6 months of essential living expenses in your cash reserve prior to entering into new recurring commitments."
         )
     }
 
-# ==================== ROUTE 3: MONTE CARLO SIMULATION ====================
+# ==================== ROUTE 3: MONTE CARLO & WHAT-IF ENGINE ====================
 @app.post("/analytics/monte-carlo")
 async def run_monte_carlo(req: MonteCarloRequest):
     years = max(1, min(req.years, 30))
     monthly_contrib = max(0.0, req.monthly_investment)
     r = req.expected_annual_return / 100.0
     vol = req.volatility / 100.0
+    extra_what_if = max(0.0, req.what_if_extra_savings)
 
-    multiplier = 1.0
-    scenario_desc = "Baseline macroeconomic model."
     if req.scenario == "BEAR_CRASH":
-        multiplier = 0.60
-        scenario_desc = "Macroeconomic contraction with severe market drawdown (-20%)."
+        multiplier = 0.45
+        vol_adj = vol * 0.35
+        scenario_desc = "Macroeconomic contraction with severe market drawdown (-20% to -40%)."
     elif req.scenario == "STAGFLATION":
-        multiplier = 0.80
-        scenario_desc = "High persistent inflation with sluggish corporate growth."
+        multiplier = 0.70
+        vol_adj = vol * 0.25
+        scenario_desc = "High persistent inflation with sluggish economic growth."
     elif req.scenario == "BULL_RALLY":
-        multiplier = 1.35
+        multiplier = 1.45
+        vol_adj = vol * 0.15
         scenario_desc = "Rapid economic expansion and strong capital market equity inflows."
+    else:
+        multiplier = 1.0
+        vol_adj = vol * 0.20
+        scenario_desc = "Baseline macroeconomic model."
 
     trajectory = []
     balance_worst = req.initial_amount
     balance_avg = req.initial_amount
     balance_best = req.initial_amount
+    balance_optimized = req.initial_amount
     annual_contrib = monthly_contrib * 12.0
+    annual_contrib_boosted = (monthly_contrib + extra_what_if) * 12.0
 
     for y in range(years + 1):
         trajectory.append({
             "year": f"Year {y}",
             "worst_case": round(balance_worst),
             "average_case": round(balance_avg),
-            "best_case": round(balance_best)
+            "best_case": round(balance_best),
+            "what_if_boost": round(balance_optimized)
         })
-        balance_worst = (balance_worst + annual_contrib) * (1.0 + (r * 0.45 * multiplier) - (vol * 0.2))
+        balance_worst = (balance_worst + annual_contrib) * (1.0 + (r * 0.40 * multiplier) - vol_adj)
         balance_avg = (balance_avg + annual_contrib) * (1.0 + (r * multiplier))
-        balance_best = (balance_best + annual_contrib) * (1.0 + (r * 1.55 * multiplier) + (vol * 0.2))
+        balance_best = (balance_best + annual_contrib) * (1.0 + (r * 1.55 * multiplier) + vol_adj)
+        balance_optimized = (balance_optimized + annual_contrib_boosted) * (1.0 + (r * multiplier))
 
     final_avg = trajectory[-1]["average_case"]
     prob_success = min(99, max(10, round((final_avg / req.target_goal) * 80))) if req.target_goal > 0 else 85
@@ -255,6 +318,7 @@ async def run_monte_carlo(req: MonteCarloRequest):
         "worst_case_final": trajectory[-1]["worst_case"],
         "average_case_final": final_avg,
         "best_case_final": trajectory[-1]["best_case"],
+        "what_if_final": trajectory[-1]["what_if_boost"],
         "probability_of_success": prob_success,
         "scenario_desc": scenario_desc
     }

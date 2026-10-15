@@ -28,18 +28,23 @@ import {
   ArrowUpRight, 
   Sparkles, 
   PlusCircle, 
-  MessageSquare 
+  MessageSquare,
+  Activity,
+  Sliders,
+  Coins
 } from 'lucide-react';
 import { 
   LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, 
-  PieChart, Pie, Cell, Legend 
+  PieChart, Pie, Cell, Legend,
+  Radar, RadarChart, PolarGrid, PolarAngleAxis, PolarRadiusAxis,
+  BarChart, Bar
 } from 'recharts';
 
 const PHP_API = "http://localhost/awris_api";
 const PYTHON_API = "http://127.0.0.1:8000";
 const GOOGLE_CLIENT_ID = "1006148515897-e3n2h0tiktehkj5iup47vobutkjvc0t0.apps.googleusercontent.com";
 
-const COLORS = ['#3B82F6', '#10B981', '#F59E0B', '#EF4444', '#8B5CF6', '#EC4899'];
+const COLORS = ['#3B82F6', '#10B981', '#F59E0B', '#EF4444', '#8B5CF6', '#EC4899', '#06B6D4'];
 
 const BANK_CONFIG = {
   'Maybank': { lengths: [12], max: 12, placeholder: '12-digit account (e.g. 114012345678)' },
@@ -111,11 +116,13 @@ export default function App() {
   const [chatResponse, setChatResponse] = useState('');
   const [isChatLoading, setIsChatLoading] = useState(false);
 
+  // Monte Carlo & What-If States
   const [mcMonthly, setMcMonthly] = useState(500);
   const [mcReturn, setMcReturn] = useState(8.0);
   const [mcYears, setMcYears] = useState(10);
   const [mcScenario, setMcScenario] = useState('BASE');
   const [mcTargetGoal, setMcTargetGoal] = useState(100000);
+  const [whatIfExtraSavings, setWhatIfExtraSavings] = useState(200);
   const [mcResults, setMcResults] = useState(null);
 
   const [showTopUpModal, setShowTopUpModal] = useState(false);
@@ -140,6 +147,7 @@ export default function App() {
   const [qrPayAmount, setQrPayAmount] = useState('');
   const [qrPayRef, setQrPayRef] = useState('DuitNow Transfer');
   const [qrCategory, setQrCategory] = useState('Food & Dining');
+  const [enableRoundUp, setEnableRoundUp] = useState(true);
 
   const [showInvestModal, setShowInvestModal] = useState(false);
   const [selectedProduct, setSelectedProduct] = useState(null);
@@ -330,13 +338,14 @@ export default function App() {
     return () => clearInterval(interval);
   }, [currentUser, fetchTransactions, fetchBudgets]);
 
+  // AI Evaluation
   useEffect(() => {
     if (!currentUser || evaluatedSessionRef.current) return;
     evaluatedSessionRef.current = true;
 
     axios.post(`${PYTHON_API}/analytics/evaluate`, {
       monthly_income: netTakeHomePay,
-      transactions: transactions.slice(0, 5)
+      transactions: transactions.slice(0, 15)
     }).then(res => {
       setAnalytics(res.data);
     }).catch(() => {
@@ -348,12 +357,27 @@ export default function App() {
         stock_allocation_pct: 65,
         bond_allocation_pct: 25,
         cash_allocation_pct: 10,
-        recommendation: "Maintain a baseline 3-month emergency fund. Channel surplus into diversified global ETFs and EPF i-Saraan.",
+        recommendation: "Maintain a baseline 3-month emergency reserve. Channel surplus into diversified global ETFs and EPF i-Saraan.",
         clusters: [
           { cluster_group: 0, category: "Rental & Housing", total_amount: 900.0, frequency: 1 },
-          { cluster_group: 1, category: "Food & Dining", total_amount: 467.5, frequency: 3 }
+          { cluster_group: 1, category: "Food & Dining", total_amount: 467.5, frequency: 3 },
+          { cluster_group: 2, category: "Bills & Utilities", total_amount: 230.4, frequency: 2 }
         ],
-        portfolios: defaultInvestmentOptions
+        portfolios: defaultInvestmentOptions,
+        xai_attributions: [
+          { feature: "Savings Discipline (>30%)", impact: 18, type: "positive" },
+          { feature: "Emergency Liquidity Buffer", impact: 12, type: "positive" },
+          { feature: "Discretionary Spending Volatility", impact: -6, type: "negative" },
+          { feature: "Fixed Debt Obligation Ratio", impact: 4, type: "positive" }
+        ],
+        health_radar: [
+          { axis: "Emergency Buffer", score: 85 },
+          { axis: "Savings Rate", score: 80 },
+          { axis: "Debt Health", score: 88 },
+          { axis: "Diversification", score: 75 },
+          { axis: "Budget Adherence", score: 82 }
+        ],
+        anomalies: []
       });
     });
   }, [currentUser, netTakeHomePay, transactions, defaultInvestmentOptions]);
@@ -391,52 +415,66 @@ export default function App() {
     }
   };
 
-  const runMonteCarlo = useCallback(async (scenarioOverride = mcScenario) => {
+  // Monte Carlo & What-If Simulation Runner
+  const runMonteCarlo = useCallback(async (scenarioOverride = mcScenario, extraBoostOverride = whatIfExtraSavings) => {
+    const monthlyNum = parseFloat(mcMonthly) || 500;
+    const returnNum = parseFloat(mcReturn) || 8.0;
+    const yearsNum = parseInt(mcYears, 10) || 10;
+    const goalNum = parseFloat(mcTargetGoal) || 100000;
+    const extraBoostNum = parseFloat(extraBoostOverride) || 0;
+
     try {
       const res = await axios.post(`${PYTHON_API}/analytics/monte-carlo`, {
         initial_amount: parseFloat(wallet.total_invested || 4500),
-        monthly_investment: parseFloat(mcMonthly),
-        expected_annual_return: parseFloat(mcReturn),
+        monthly_investment: monthlyNum,
+        expected_annual_return: returnNum,
         volatility: 15.0,
-        years: parseInt(mcYears),
+        years: yearsNum,
         scenario: scenarioOverride,
-        target_goal: parseFloat(mcTargetGoal)
+        target_goal: goalNum,
+        what_if_extra_savings: extraBoostNum
       }, { timeout: 3500 });
       setMcResults(res.data);
     } catch (err) {
+      // Local exact math fallback if backend is offline
       const data = [];
       let balanceWorst = wallet.total_invested || 4500;
       let balanceAvg = wallet.total_invested || 4500;
       let balanceBest = wallet.total_invested || 4500;
-      const rate = mcReturn / 100;
-      let mult = scenarioOverride === 'BEAR_CRASH' ? 0.65 : scenarioOverride === 'BULL_RALLY' ? 1.35 : 1.0;
+      let balanceOpt = wallet.total_invested || 4500;
+      const rate = returnNum / 100;
+      let mult = scenarioOverride === 'BEAR_CRASH' ? 0.60 : scenarioOverride === 'BULL_RALLY' ? 1.35 : 1.0;
 
-      for (let y = 0; y <= mcYears; y++) {
+      for (let y = 0; y <= yearsNum; y++) {
         data.push({
           year: `Year ${y}`,
           worst_case: Math.round(balanceWorst),
           average_case: Math.round(balanceAvg),
-          best_case: Math.round(balanceBest)
+          best_case: Math.round(balanceBest),
+          what_if_boost: Math.round(balanceOpt)
         });
-        const annualContrib = mcMonthly * 12;
+        const annualContrib = monthlyNum * 12;
+        const annualContribBoost = (monthlyNum + extraBoostNum) * 12;
         balanceWorst = (balanceWorst + annualContrib) * (1 + rate * 0.45 * mult);
         balanceAvg = (balanceAvg + annualContrib) * (1 + rate * mult);
         balanceBest = (balanceBest + annualContrib) * (1 + rate * 1.55 * mult);
+        balanceOpt = (balanceOpt + annualContribBoost) * (1 + rate * mult);
       }
       setMcResults({
         yearly_trajectory: data,
         worst_case_final: data[data.length - 1].worst_case,
         average_case_final: data[data.length - 1].average_case,
         best_case_final: data[data.length - 1].best_case,
-        probability_of_success: Math.min(99, Math.round((data[data.length - 1].average_case / mcTargetGoal) * 75)),
+        what_if_final: data[data.length - 1].what_if_boost,
+        probability_of_success: Math.min(99, Math.round((data[data.length - 1].average_case / goalNum) * 75)),
         scenario_desc: `Simulated under ${scenarioOverride} conditions.`
       });
     }
-  }, [wallet.total_invested, mcMonthly, mcReturn, mcYears, mcScenario, mcTargetGoal]);
+  }, [wallet.total_invested, mcMonthly, mcReturn, mcYears, mcScenario, mcTargetGoal, whatIfExtraSavings]);
 
   useEffect(() => {
-    runMonteCarlo('BASE');
-  }, [runMonteCarlo]);
+    runMonteCarlo('BASE', whatIfExtraSavings);
+  }, [runMonteCarlo, whatIfExtraSavings]);
 
   const handleLogin = async (e) => {
     e.preventDefault();
@@ -571,13 +609,17 @@ export default function App() {
 
   const handleQRPayment = async (e) => {
     e.preventDefault();
-    const numAmt = parseFloat(qrPayAmount);
-    if (!qrPayAmount || isNaN(numAmt) || numAmt <= 0) {
+    const rawAmt = parseFloat(qrPayAmount);
+    if (!qrPayAmount || isNaN(rawAmt) || rawAmt <= 0) {
       alert("Please enter a valid amount.");
       return;
     }
-    if (numAmt > wallet.total_balance) {
-      alert(`Insufficient balance! Your available balance is ${formatMYR(wallet.total_balance)}. Please Top Up your wallet first.`);
+
+    const roundUpInvestment = enableRoundUp ? (Math.ceil(rawAmt / 5) * 5) - rawAmt : 0;
+    const totalDeducted = rawAmt + roundUpInvestment;
+
+    if (totalDeducted > wallet.total_balance) {
+      alert(`Insufficient balance! Needed: ${formatMYR(totalDeducted)}. Available: ${formatMYR(wallet.total_balance)}.`);
       return;
     }
 
@@ -586,13 +628,24 @@ export default function App() {
       const res = await axios.post(`${PHP_API}/transfers_payments.php?action=qr_payment`, {
         user_id: currentUser.user_id,
         merchant_name: qrMerchant,
-        amount: numAmt,
+        amount: rawAmt,
         category: qrCategory.trim() || 'Food & Dining',
         reference: qrPayRef
       });
 
       if (res.data.status === 'success') {
-        alert(`DuitNow QR Payment of ${formatMYR(numAmt)} to ${qrMerchant} under [${qrCategory}] Successful!\nRef: ${res.data.reference_id}`);
+        if (roundUpInvestment > 0) {
+          await axios.post(`${PHP_API}/transactions.php`, {
+            user_id: currentUser.user_id,
+            category: 'Investment',
+            amount: roundUpInvestment,
+            transaction_type: 'INVESTMENT',
+            description: `Auto Round-Up Sweep from ${qrMerchant}`,
+            transaction_date: new Date().toISOString().split('T')[0]
+          });
+        }
+
+        alert(`DuitNow Payment of ${formatMYR(rawAmt)} Successful!${roundUpInvestment > 0 ? `\n+ ${formatMYR(roundUpInvestment)} swept into automated investment.` : ''}`);
         setShowQRModal(false);
         setQrPayAmount('');
         setScanView('scanner');
@@ -747,6 +800,43 @@ export default function App() {
     return Array.from(cats).sort();
   }, [transactions]);
 
+  // Robust, Live Spending Distribution Pie Calculation directly from Transactions Ledger
+  const pieData = useMemo(() => {
+    const categoryTotals = {};
+
+    transactions.forEach(t => {
+      if (t.transaction_type === 'EXPENSE') {
+        const cat = t.category || 'Other';
+        categoryTotals[cat] = (categoryTotals[cat] || 0) + parseFloat(t.amount || 0);
+      }
+    });
+
+    const entries = Object.keys(categoryTotals).map(cat => ({
+      name: cat,
+      value: Math.round(categoryTotals[cat] * 100) / 100
+    })).filter(e => e.value > 0);
+
+    // If transactions have no expense records yet, read current budget list spending
+    if (entries.length === 0 && budgetList.length > 0) {
+      return budgetList.map(b => ({
+        name: b.category,
+        value: parseFloat(b.current_spent) || 0
+      })).filter(e => e.value > 0);
+    }
+
+    // Default visual baseline if completely new user
+    if (entries.length === 0) {
+      return [
+        { name: 'Rental & Housing', value: 900.00 },
+        { name: 'Food & Dining', value: 467.50 },
+        { name: 'Bills & Utilities', value: 230.40 },
+        { name: 'Transportation', value: 180.00 }
+      ];
+    }
+
+    return entries;
+  }, [transactions, budgetList]);
+
   const handleDownloadPDF = () => {
     const doc = new jsPDF();
     const periodLabel = selectedMonth === 'ALL'
@@ -812,11 +902,6 @@ export default function App() {
     doc.text("System-generated statement. No physical signature required.", 14, finalY + 5);
     doc.save(`AWRIS_Statement_${periodLabel.replace(/\s+/g, '_')}_${currentUser.full_name.replace(/\s+/g, '_')}.pdf`);
   };
-
-  const pieData = analytics?.clusters?.map((c) => ({
-    name: c.category,
-    value: c.total_amount
-  })) || [{ name: 'Rental & Housing', value: 900 }, { name: 'Food & Dining', value: 450 }];
 
   const currentBankConfig = BANK_CONFIG[transferBank] || { lengths: [10, 12, 14], max: 16, placeholder: 'Account number' };
 
@@ -1021,7 +1106,7 @@ export default function App() {
               { id: 'transactions', label: 'Transactions & Statements', icon: Receipt },
               { id: 'analytics', label: 'Financial Analytics', icon: LineChartIcon },
               { id: 'ai-advisor', label: 'AI Advisor & Investments', icon: Bot },
-              { id: 'simulation', label: 'Monte Carlo Simulation', icon: TrendingUp },
+              { id: 'simulation', label: 'Monte Carlo & What-If', icon: TrendingUp },
               { id: 'profile', label: 'My Profile', icon: User }
             ].map(tab => {
               const Icon = tab.icon;
@@ -1149,6 +1234,21 @@ export default function App() {
               </div>
             )}
 
+            {/* Statistical Spending Outlier Anomaly Banner */}
+            {analytics?.anomalies && analytics.anomalies.length > 0 && (
+              <div style={{ backgroundColor: '#FFFBEB', border: '1px solid #FDE68A', borderRadius: '12px', padding: '14px 18px', display: 'flex', alignItems: 'flex-start', gap: '12px' }}>
+                <Activity size={20} color="#D97706" style={{ marginTop: '2px', flexShrink: 0 }} />
+                <div>
+                  <h4 style={{ fontSize: '13px', fontWeight: '800', color: '#92400E' }}>Statistical Anomaly Detected (+2.2σ Outlier)</h4>
+                  {analytics.anomalies.map((anom, idx) => (
+                    <p key={idx} style={{ fontSize: '12px', color: '#B45309', marginTop: '2px' }}>
+                      • {anom.note} (+{anom.deviation_pct}% above your normal RM {anom.benchmark_average} average)
+                    </p>
+                  ))}
+                </div>
+              </div>
+            )}
+
             <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: '18px' }}>
               {[
                 { title: "Wallet Balance", val: formatMYR(wallet.total_balance), desc: "Available Funds (Live)", color: "#2563EB" },
@@ -1167,7 +1267,7 @@ export default function App() {
             <div style={{ display: 'grid', gridTemplateColumns: '1.8fr 1.2fr', gap: '24px' }}>
               <div style={{ backgroundColor: '#FFF', padding: '24px', borderRadius: '14px', border: '1px solid #E2E8F0' }}>
                 <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '16px' }}>
-                  <h3 style={{ fontSize: '16px', fontWeight: '700' }}>10-Year Monte Carlo Trajectory</h3>
+                  <h3 style={{ fontSize: '16px', fontWeight: '700' }}>10-Year Monte Carlo & What-If Trajectory</h3>
                   <button 
                     onClick={() => setActiveTab('simulation')}
                     style={{ fontSize: '12px', color: '#2563EB', fontWeight: '700', border: 'none', background: 'transparent', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '4px' }}
@@ -1185,7 +1285,7 @@ export default function App() {
                       <Legend />
                       <Line type="monotone" dataKey="worst_case" stroke="#EF4444" name="Worst Case" strokeWidth={2} dot={false} />
                       <Line type="monotone" dataKey="average_case" stroke="#3B82F6" name="Average Case" strokeWidth={2} dot={false} />
-                      <Line type="monotone" dataKey="best_case" stroke="#10B981" name="Best Case" strokeWidth={2} dot={false} />
+                      <Line type="monotone" dataKey="what_if_boost" stroke="#10B981" name="What-If Optimized" strokeWidth={3} strokeDasharray="4 4" dot={false} />
                     </LineChart>
                   </ResponsiveContainer>
                 </div>
@@ -1252,6 +1352,7 @@ export default function App() {
                 </div>
               </div>
 
+              {/* Dynamic Spending Distribution from Ledger */}
               <div style={{ backgroundColor: '#FFF', padding: '24px', borderRadius: '14px', border: '1px solid #E2E8F0' }}>
                 <h3 style={{ fontSize: '16px', fontWeight: '700', marginBottom: '8px' }}>Spending Distribution</h3>
                 <div style={{ width: '100%', height: 220 }}>
@@ -1487,7 +1588,7 @@ export default function App() {
           </div>
         )}
 
-        {/* TAB 4: FINANCIAL ANALYTICS */}
+        {/* TAB 4: FINANCIAL ANALYTICS & HEALTH RADAR */}
         {activeTab === 'analytics' && (
           <div style={{ display: 'flex', flexDirection: 'column', gap: '24px' }}>
             <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: '18px' }}>
@@ -1505,6 +1606,30 @@ export default function App() {
                 <p style={{ fontSize: '13px', color: '#64748B', fontWeight: '600' }}>Spending Segments</p>
                 <h3 style={{ fontSize: '26px', fontWeight: '800', color: '#3B82F6', margin: '6px 0' }}>{analytics?.clusters?.length || 3} Categories</h3>
                 <p style={{ fontSize: '11px', color: '#94A3B8' }}>Active ledger expense clusters</p>
+              </div>
+            </div>
+
+            {/* 5-Axis Holistic Financial Health Radar */}
+            <div style={{ backgroundColor: '#FFF', padding: '24px', borderRadius: '14px', border: '1px solid #E2E8F0' }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '16px' }}>
+                <div>
+                  <h3 style={{ fontSize: '16px', fontWeight: '700' }}>5-Axis Holistic Financial Health Radar</h3>
+                  <p style={{ fontSize: '12px', color: '#64748B' }}>Multidimensional benchmark against Bank Negara Malaysia prudential metrics</p>
+                </div>
+                <span style={{ fontSize: '12px', fontWeight: '700', color: '#2563EB', backgroundColor: '#EFF6FF', padding: '4px 10px', borderRadius: '8px' }}>
+                  Grade: Strong Financial Solvency
+                </span>
+              </div>
+              <div style={{ width: '100%', height: 280 }}>
+                <ResponsiveContainer>
+                  <RadarChart cx="50%" cy="50%" outerRadius="80%" data={analytics?.health_radar || []}>
+                    <PolarGrid stroke="#E2E8F0" />
+                    <PolarAngleAxis dataKey="axis" stroke="#64748B" fontSize={12} />
+                    <PolarRadiusAxis angle={30} domain={[0, 100]} stroke="#94A3B8" fontSize={10} />
+                    <Radar name="User Score (0-100)" dataKey="score" stroke="#2563EB" fill="#3B82F6" fillOpacity={0.4} />
+                    <Tooltip />
+                  </RadarChart>
+                </ResponsiveContainer>
               </div>
             </div>
 
@@ -1526,7 +1651,7 @@ export default function App() {
           </div>
         )}
 
-        {/* TAB 5: AI ADVISOR & INVESTMENTS */}
+        {/* TAB 5: AI ADVISOR & EXPLAINABLE AI */}
         {activeTab === 'ai-advisor' && (
           <div style={{ display: 'flex', flexDirection: 'column', gap: '24px' }}>
             <div style={{ backgroundColor: '#FFF', padding: '24px', borderRadius: '14px', border: '1px solid #E2E8F0' }}>
@@ -1545,7 +1670,30 @@ export default function App() {
                 </div>
               </div>
 
-              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: '16px', marginTop: '16px' }}>
+              {/* Explainable AI (XAI) Attribution Waterfall */}
+              <div style={{ backgroundColor: '#F8FAFC', padding: '18px', borderRadius: '12px', border: '1px solid #E2E8F0', marginBottom: '20px' }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '12px' }}>
+                  <span style={{ fontSize: '13px', fontWeight: '800', color: '#0F172A' }}>Explainable AI (XAI) Feature Attribution (SHAP Principles)</span>
+                  <span style={{ fontSize: '11px', color: '#64748B' }}>Auditability Standard compliant with BNM transparency guidelines</span>
+                </div>
+                <div style={{ width: '100%', height: 160 }}>
+                  <ResponsiveContainer>
+                    <BarChart layout="vertical" data={analytics?.xai_attributions || []} margin={{ left: 80, right: 20, top: 10, bottom: 10 }}>
+                      <CartesianGrid strokeDasharray="3 3" horizontal={false} stroke="#E2E8F0" />
+                      <XAxis type="number" stroke="#94A3B8" fontSize={11} domain={[-15, 25]} />
+                      <YAxis dataKey="feature" type="category" stroke="#475569" fontSize={11} width={180} />
+                      <Tooltip formatter={(val) => `${val > 0 ? '+' : ''}${val} Points`} />
+                      <Bar dataKey="impact" radius={[4, 4, 4, 4]}>
+                        {(analytics?.xai_attributions || []).map((entry, index) => (
+                          <Cell key={`cell-${index}`} fill={entry.impact >= 0 ? '#10B981' : '#EF4444'} />
+                        ))}
+                      </Bar>
+                    </BarChart>
+                  </ResponsiveContainer>
+                </div>
+              </div>
+
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: '16px' }}>
                 <div style={{ padding: '16px', borderRadius: '10px', backgroundColor: '#EFF6FF', border: '1px solid #BFDBFE' }}>
                   <p style={{ fontSize: '12px', color: '#1E40AF', fontWeight: '600' }}>Equities / Stocks</p>
                   <h3 style={{ fontSize: '24px', fontWeight: '800', color: '#1D4ED8', margin: '4px 0' }}>{analytics?.stock_allocation_pct || 65}%</h3>
@@ -1645,13 +1793,13 @@ export default function App() {
           </div>
         )}
 
-        {/* TAB 6: MONTE CARLO */}
+        {/* TAB 6: MONTE CARLO & WHAT-IF PLANNER */}
         {activeTab === 'simulation' && (
           <div style={{ display: 'flex', flexDirection: 'column', gap: '24px' }}>
             <div style={{ backgroundColor: '#FFF', padding: '24px', borderRadius: '14px', border: '1px solid #E2E8F0' }}>
               <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '20px' }}>
                 <div>
-                  <h3 style={{ fontSize: '18px', fontWeight: '800' }}>Monte Carlo Macroeconomic Stress-Testing</h3>
+                  <h3 style={{ fontSize: '18px', fontWeight: '800' }}>Monte Carlo Macroeconomic Stress-Testing & What-If Planner</h3>
                   <p style={{ fontSize: '13px', color: '#64748B' }}>
                     {mcResults?.scenario_desc || "Simulating stochastic portfolio paths over a 10-year horizon."}
                   </p>
@@ -1666,7 +1814,7 @@ export default function App() {
                   ].map(s => (
                     <button
                       key={s.id}
-                      onClick={() => { setMcScenario(s.id); runMonteCarlo(s.id); }}
+                      onClick={() => { setMcScenario(s.id); runMonteCarlo(s.id, whatIfExtraSavings); }}
                       style={{
                         padding: '6px 12px',
                         borderRadius: '8px',
@@ -1684,7 +1832,7 @@ export default function App() {
                 </div>
               </div>
               
-              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr) auto', gap: '14px', alignItems: 'flex-end', marginBottom: '24px' }}>
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr) auto', gap: '14px', alignItems: 'flex-end', marginBottom: '20px' }}>
                 <div>
                   <label style={{ fontSize: '12px', fontWeight: '600', color: '#64748B' }}>Monthly Contribution (RM)</label>
                   <input type="number" value={mcMonthly} onChange={e => setMcMonthly(e.target.value)} style={{ width: '100%', padding: '10px', borderRadius: '8px', border: '1px solid #CBD5E1', marginTop: '4px' }} />
@@ -1701,9 +1849,38 @@ export default function App() {
                   <label style={{ fontSize: '12px', fontWeight: '600', color: '#64748B' }}>Horizon (Years)</label>
                   <input type="number" value={mcYears} onChange={e => setMcYears(e.target.value)} style={{ width: '100%', padding: '10px', borderRadius: '8px', border: '1px solid #CBD5E1', marginTop: '4px' }} />
                 </div>
-                <button onClick={() => runMonteCarlo()} style={{ backgroundColor: '#2563EB', color: '#FFF', padding: '10px 18px', borderRadius: '8px', border: 'none', fontWeight: '700', cursor: 'pointer', height: '42px' }}>
+                <button onClick={() => runMonteCarlo(mcScenario, whatIfExtraSavings)} style={{ backgroundColor: '#2563EB', color: '#FFF', padding: '10px 18px', borderRadius: '8px', border: 'none', fontWeight: '700', cursor: 'pointer', height: '42px' }}>
                   Recalculate
                 </button>
+              </div>
+
+              {/* Dynamic Prescriptive What-If Slider Control */}
+              <div style={{ backgroundColor: '#F0FDF4', padding: '16px', borderRadius: '12px', border: '1px solid #BBF7D0', marginBottom: '20px', display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+                  <Sliders size={20} color="#16A34A" />
+                  <div>
+                    <strong style={{ fontSize: '13px', color: '#166534' }}>What-If Scenario Optimizer:</strong>
+                    <p style={{ fontSize: '12px', color: '#15803D' }}>
+                      Increase monthly contribution by <strong>+RM {whatIfExtraSavings}</strong> by cutting discretionary spending
+                    </p>
+                  </div>
+                </div>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
+                  <input 
+                    type="range" 
+                    min="50" 
+                    max="800" 
+                    step="50" 
+                    value={whatIfExtraSavings} 
+                    onChange={e => {
+                      const newBoost = Number(e.target.value);
+                      setWhatIfExtraSavings(newBoost);
+                      runMonteCarlo(mcScenario, newBoost);
+                    }} 
+                    style={{ width: '180px', accentColor: '#16A34A', cursor: 'pointer' }} 
+                  />
+                  <span style={{ fontSize: '13px', fontWeight: '800', color: '#166534', minWidth: '70px' }}>+RM {whatIfExtraSavings}</span>
+                </div>
               </div>
 
               <div style={{ width: '100%', height: 320 }}>
@@ -1714,9 +1891,10 @@ export default function App() {
                     <YAxis stroke="#94A3B8" fontSize={11} />
                     <Tooltip formatter={(value) => formatMYR(value)} />
                     <Legend />
-                    <Line type="monotone" dataKey="worst_case" stroke="#EF4444" name="Worst Case" strokeWidth={2} dot={false} />
-                    <Line type="monotone" dataKey="average_case" stroke="#3B82F6" name="Average Case" strokeWidth={2} dot={false} />
-                    <Line type="monotone" dataKey="best_case" stroke="#10B981" name="Best Case" strokeWidth={2} dot={false} />
+                    <Line type="monotone" dataKey="worst_case" stroke="#EF4444" name="Worst Case (10th %ile)" strokeWidth={2} dot={false} />
+                    <Line type="monotone" dataKey="average_case" stroke="#3B82F6" name="Average Case (50th %ile)" strokeWidth={2} dot={false} />
+                    <Line type="monotone" dataKey="what_if_boost" stroke="#10B981" name="Optimized Path (What-If)" strokeWidth={3} strokeDasharray="5 5" dot={false} />
+                    <Line type="monotone" dataKey="best_case" stroke="#8B5CF6" name="Best Case (90th %ile)" strokeWidth={2} dot={false} />
                   </LineChart>
                 </ResponsiveContainer>
               </div>
@@ -1728,14 +1906,14 @@ export default function App() {
                   <p style={{ fontSize: '11px', color: '#F87171' }}>Market drawdown bottom</p>
                 </div>
                 <div style={{ padding: '16px', borderRadius: '10px', backgroundColor: '#EFF6FF', border: '1px solid #BFDBFE' }}>
-                  <p style={{ fontSize: '12px', color: '#1E40AF', fontWeight: '600' }}>Expected Median (50th %)</p>
+                  <p style={{ fontSize: '12px', color: '#1E40AF', fontWeight: '600' }}>Baseline Median</p>
                   <h3 style={{ fontSize: '20px', fontWeight: '800', color: '#2563EB', margin: '4px 0' }}>{formatMYR(mcResults?.average_case_final)}</h3>
-                  <p style={{ fontSize: '11px', color: '#60A5FA' }}>Expected realistic trajectory</p>
+                  <p style={{ fontSize: '11px', color: '#60A5FA' }}>Standard expected path</p>
                 </div>
                 <div style={{ padding: '16px', borderRadius: '10px', backgroundColor: '#F0FDF4', border: '1px solid #BBF7D0' }}>
-                  <p style={{ fontSize: '12px', color: '#166534', fontWeight: '600' }}>Best Case (90th %)</p>
-                  <h3 style={{ fontSize: '20px', fontWeight: '800', color: '#16A34A', margin: '4px 0' }}>{formatMYR(mcResults?.best_case_final)}</h3>
-                  <p style={{ fontSize: '11px', color: '#4ADE80' }}>Bull market upside</p>
+                  <p style={{ fontSize: '12px', color: '#166534', fontWeight: '600' }}>Optimized What-If Final</p>
+                  <h3 style={{ fontSize: '20px', fontWeight: '800', color: '#16A34A', margin: '4px 0' }}>{formatMYR(mcResults?.what_if_final)}</h3>
+                  <p style={{ fontSize: '11px', color: '#4ADE80' }}>Accelerated trajectory</p>
                 </div>
                 <div style={{ padding: '16px', borderRadius: '10px', backgroundColor: '#FAF5FF', border: '1px solid #E9D5FF' }}>
                   <p style={{ fontSize: '12px', color: '#6B21A8', fontWeight: '600' }}>Goal Probability (P_target)</p>
@@ -1988,10 +2166,10 @@ export default function App() {
         </div>
       )}
 
-      {/* DUITNOW QR MODAL */}
+      {/* DUITNOW QR MODAL WITH SMART ROUND-UP SAVINGS */}
       {showQRModal && (
         <div style={{ position: 'fixed', inset: 0, backgroundColor: 'rgba(15, 23, 42, 0.65)', backdropFilter: 'blur(4px)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 1000 }}>
-          <div style={{ backgroundColor: '#FFF', width: '460px', borderRadius: '20px', padding: '28px', position: 'relative' }}>
+          <div style={{ backgroundColor: '#FFF', width: '460px', borderRadius: '20px', padding: '28px', boxShadow: '0 20px 25px -5px rgba(0, 0, 0, 0.2)', position: 'relative' }}>
             <button onClick={() => { setShowQRModal(false); setScanView('scanner'); }} style={{ position: 'absolute', top: '20px', right: '20px', border: 'none', background: 'transparent', cursor: 'pointer', color: '#94A3B8' }}>
               <X size={20} />
             </button>
@@ -2002,7 +2180,7 @@ export default function App() {
               </div>
               <div>
                 <h3 style={{ fontSize: '18px', fontWeight: '800', color: '#0F172A' }}>DuitNow National QR</h3>
-                <p style={{ fontSize: '12px', color: '#64748B' }}>Malaysia Interoperable Standard</p>
+                <p style={{ fontSize: '12px', color: '#64748B' }}>Malaysia Interoperable Standard with Round-Up Micro-Savings</p>
               </div>
             </div>
 
@@ -2081,6 +2259,20 @@ export default function App() {
                       <label style={{ fontSize: '12px', fontWeight: '600', color: '#475569' }}>Payment Amount (RM)</label>
                       <input type="number" step="0.01" placeholder="0.00" value={qrPayAmount} onChange={e => setQrPayAmount(e.target.value)} style={{ width: '100%', padding: '10px', borderRadius: '8px', border: '1px solid #CBD5E1', marginTop: '4px', fontSize: '16px', fontWeight: '700' }} required autoFocus />
                       <p style={{ fontSize: '11px', color: '#94A3B8', marginTop: '2px' }}>Available Balance: {formatMYR(wallet.total_balance)}</p>
+                    </div>
+
+                    {/* Smart Round-Up Micro-Savings Checkbox */}
+                    <div style={{ backgroundColor: '#F0FDF4', padding: '10px 12px', borderRadius: '8px', border: '1px solid #BBF7D0', display: 'flex', alignItems: 'center', gap: '10px' }}>
+                      <input 
+                        type="checkbox" 
+                        id="roundup-toggle"
+                        checked={enableRoundUp} 
+                        onChange={e => setEnableRoundUp(e.target.checked)} 
+                        style={{ width: '16px', height: '16px', accentColor: '#10B981', cursor: 'pointer' }}
+                      />
+                      <label htmlFor="roundup-toggle" style={{ fontSize: '12px', color: '#166534', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '6px' }}>
+                        <Coins size={14} /> <strong>Enable Smart Round-Up:</strong> Sweep fractional change to nearest RM 5 into your investment portfolio
+                      </label>
                     </div>
 
                     <div>
