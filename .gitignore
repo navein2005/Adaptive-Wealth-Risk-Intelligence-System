@@ -1,0 +1,16 @@
+﻿# Dependencies
+node_modules/
+awris-frontend/node_modules/
+
+# Python cache & environments
+__pycache__/
+*.pyc
+venv/
+.env.local
+
+# Build artifacts
+awris-frontend/build/
+
+# Operating system files
+.DS_Store
+Thumbs.db
