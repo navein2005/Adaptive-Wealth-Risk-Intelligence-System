@@ -77,10 +77,7 @@ const formatMYR = (val) => {
 };
 
 export default function App() {
-  const [currentUser, setCurrentUser] = useState(() => {
-    const saved = localStorage.getItem('awris_user');
-    return saved ? JSON.parse(saved) : null;
-  });
+  const [currentUser, setCurrentUser] = useState(null);
   const [authView, setAuthView] = useState('login');
   const [authEmail, setAuthEmail] = useState('');
   const [authPassword, setAuthPassword] = useState('');
@@ -89,12 +86,22 @@ export default function App() {
   const [authError, setAuthError] = useState('');
   const [isAuthLoading, setIsAuthLoading] = useState(false);
 
+  useEffect(() => {
+    try {
+      localStorage.removeItem('awris_user');
+    } catch (error) {
+      console.warn('Unable to clear the saved AWRIS session on startup.', error);
+    }
+  }, []);
+
   const [googlePendingProfile, setGooglePendingProfile] = useState(null);
   const [googleIncomeInput, setGoogleIncomeInput] = useState('4200.00');
 
   const [activeTab, setActiveTab] = useState('dashboard');
   const [wallet, setWallet] = useState({ total_balance: 0.00, total_income: 0.00, total_expense: 0.00, total_invested: 0.00 });
   const [transactions, setTransactions] = useState([]);
+  const [transactionsRefreshFailed, setTransactionsRefreshFailed] = useState(false);
+  const [budgetsRefreshFailed, setBudgetsRefreshFailed] = useState(false);
 
   const currentSystemMonth = String(new Date().getMonth() + 1);
   const currentSystemYear = String(new Date().getFullYear());
@@ -218,7 +225,6 @@ export default function App() {
       });
 
       if (res.data.status === 'success') {
-        localStorage.setItem('awris_user', JSON.stringify(res.data.user));
         setCurrentUser(res.data.user);
       } else if (res.data.status === 'not_registered') {
         setAuthError("This Google account has not registered yet. Please click 'Sign Up' below to create your account.");
@@ -249,7 +255,6 @@ export default function App() {
       });
 
       if (res.data.status === 'success') {
-        localStorage.setItem('awris_user', JSON.stringify(res.data.user));
         setCurrentUser(res.data.user);
         setGooglePendingProfile(null);
       } else {
@@ -299,6 +304,7 @@ export default function App() {
       });
       const res = await axios.get(`${PHP_API}/transactions.php?${params.toString()}`);
       if (res.data.status === 'success') {
+        setTransactionsRefreshFailed(false);
         setTransactions(res.data.transactions || []);
         if (res.data.wallet) {
           setWallet({
@@ -310,6 +316,7 @@ export default function App() {
         }
       }
     } catch (err) {
+      setTransactionsRefreshFailed(true);
       console.warn("Transactions fetch warning:", err);
     }
   }, [currentUser, selectedMonth, selectedYear, selectedCategory]);
@@ -319,23 +326,33 @@ export default function App() {
     try {
       const res = await axios.get(`${PHP_API}/budgets.php?user_id=${currentUser.user_id}`);
       if (res.data.status === 'success') {
+        setBudgetsRefreshFailed(false);
         setBudgetList(res.data.budgets || []);
         setActiveAlerts(res.data.active_alerts || []);
       }
     } catch (err) {
+      setBudgetsRefreshFailed(true);
       console.warn("Budgets load warning:", err);
     }
   }, [currentUser]);
 
   useEffect(() => {
     if (!currentUser) return;
-    fetchTransactions();
-    fetchBudgets();
-    const interval = setInterval(() => {
+    const refreshAccountData = () => {
+      if (document.visibilityState !== 'visible') return;
       fetchTransactions();
       fetchBudgets();
-    }, 4000);
-    return () => clearInterval(interval);
+    };
+
+    refreshAccountData();
+    const interval = setInterval(refreshAccountData, 30000);
+    window.addEventListener('focus', refreshAccountData);
+    document.addEventListener('visibilitychange', refreshAccountData);
+    return () => {
+      clearInterval(interval);
+      window.removeEventListener('focus', refreshAccountData);
+      document.removeEventListener('visibilitychange', refreshAccountData);
+    };
   }, [currentUser, fetchTransactions, fetchBudgets]);
 
   // AI Evaluation
@@ -488,7 +505,6 @@ export default function App() {
       });
 
       if (res.data.status === 'success') {
-        localStorage.setItem('awris_user', JSON.stringify(res.data.user));
         setCurrentUser(res.data.user);
       } else {
         setAuthError(res.data.message || 'Login failed.');
@@ -514,7 +530,6 @@ export default function App() {
       });
 
       if (res.data.status === 'success') {
-        localStorage.setItem('awris_user', JSON.stringify(res.data.user));
         setCurrentUser(res.data.user);
       } else {
         setAuthError(res.data.message || 'Registration failed.');
@@ -527,11 +542,12 @@ export default function App() {
   };
 
   const handleLogout = () => {
-    localStorage.removeItem('awris_user');
     setCurrentUser(null);
     setAuthEmail('');
     setAuthPassword('');
     setGooglePendingProfile(null);
+    setTransactionsRefreshFailed(false);
+    setBudgetsRefreshFailed(false);
     evaluatedSessionRef.current = false;
   };
 
@@ -1215,6 +1231,12 @@ export default function App() {
             </button>
           </div>
         </header>
+
+        {(transactionsRefreshFailed || budgetsRefreshFailed) && (
+          <div role="status" aria-live="polite" style={{ backgroundColor: '#FFFBEB', border: '1px solid #FDE68A', borderRadius: '10px', padding: '10px 14px', marginBottom: '20px', color: '#92400E', fontSize: '13px' }}>
+            Some account data could not be refreshed. Check your connection; the app will retry automatically.
+          </div>
+        )}
 
         {/* TAB 1: DASHBOARD */}
         {activeTab === 'dashboard' && (
