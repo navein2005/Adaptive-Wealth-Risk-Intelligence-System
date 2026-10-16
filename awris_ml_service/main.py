@@ -1,11 +1,10 @@
 import os
 import re
+import requests
 from typing import List, Optional
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-from google import genai
-from google.genai import types
 
 app = FastAPI(title="AWRIS AI Intelligence Engine")
 
@@ -17,14 +16,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "AQ.Ab8RN6KNy_sAXZZ_eVlgDcSnc4rVNFRXT4mpUiJE8EYe76DVGA")
-
-try:
-    client = genai.Client(api_key=GEMINI_API_KEY)
-    print("✓ Google GenAI Client initialized successfully.")
-except Exception as e:
-    print(f"GenAI Client Init Note: {e}")
-    client = None
+GROQ_API_KEY = os.getenv("GROQ_API_KEY", "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")
 
 # ==================== DATA SCHEMAS ====================
 class TransactionItem(BaseModel):
@@ -123,6 +115,7 @@ async def evaluate_finances(data: EvaluationRequest):
                 "frequency": category_counts.get(cat, 1)
             })
 
+    # Statistical Anomaly Spike Detection (> +2.2 sigma / outlier)
     anomalies = []
     for tx in data.transactions:
         if tx.transaction_type == "EXPENSE" and category_counts.get(tx.category, 0) > 0:
@@ -136,6 +129,7 @@ async def evaluate_finances(data: EvaluationRequest):
                     "note": f"Unusual outflow of RM {tx.amount:,.2f} detected in {tx.category}."
                 })
 
+    # Explainable AI (XAI) Attribution Breakdown
     base_score = 50
     savings_impact = 18 if computed_savings_rate >= 30 else (10 if computed_savings_rate >= 15 else -5)
     liquid_runway_impact = 12 if (total_income * 2.5) > total_expense else -8
@@ -149,6 +143,7 @@ async def evaluate_finances(data: EvaluationRequest):
         {"feature": "Fixed Debt Obligation Ratio", "impact": 4, "type": "positive"}
     ]
 
+    # 5-Axis Holistic Financial Health Radar Scores (0 to 100)
     health_radar = [
         {"axis": "Emergency Buffer", "score": min(95, max(20, round((savings_amount / (total_expense or 1)) * 40)))},
         {"axis": "Savings Rate", "score": min(100, max(20, round(computed_savings_rate * 2.5)))},
@@ -180,86 +175,162 @@ async def evaluate_finances(data: EvaluationRequest):
 @app.post("/analytics/advisor-chat")
 async def chat_with_advisor(query: ChatQuery):
     prompt_text = query.user_query.strip()
-    net_income = query.monthly_income if query.monthly_income > 0 else 3708.60
+    net_income = query.monthly_income if query.monthly_income > 0 else 3973.50
     wallet_balance = query.total_balance
+    invested_amt = query.invested_amount
 
     print(f"\n[AI Query Received]: '{prompt_text}' | Net: RM {net_income:,.2f} | Wallet: RM {wallet_balance:,.2f}")
 
     system_instruction = (
-        "You are the senior AWRIS Financial Advisor in Malaysia operating under Bank Negara Malaysia (BNM) guidelines. "
-        f"The user has a Net Monthly Take-Home Pay of RM {net_income:,.2f} and an available wallet balance of RM {wallet_balance:,.2f}. "
-        "Analyze the user's specific query directly. If they mention a phone, gadget, Samsung, iPhone, vehicle, loan, or investment, "
-        "give realistic numbers in Malaysian Ringgit (MYR), assess affordabiity based on their income and wallet, calculate monthly installments or DSR, "
-        "and advise clearly. Keep the response to 2 structured paragraphs."
+        "You are the senior AWRIS Financial Advisor in Malaysia operating strictly under Bank Negara Malaysia (BNM) guidelines. "
+        f"The user has a Net Monthly Take-Home Pay of RM {net_income:,.2f}, an available liquid wallet balance of RM {wallet_balance:,.2f}, "
+        f"and an invested portfolio of RM {invested_amt:,.2f}. "
+        "Directly answer their question with real quantitative financial reasoning in Malaysian Ringgit (MYR). "
+        "Identify whatever they ask about (vehicles, gaming consoles, Apple products, debt payoff vs StashAway investing, savings strategies). "
+        "Estimate realistic Malaysian market pricing, compute exact loan installments or DSR percentages where relevant, "
+        "and provide clear, decisive guidance. Keep your answer to 2 concise, professional paragraphs."
     )
 
-    # 1. Multi-tier model fallback for Google GenAI SDK
-    active_models = ["gemini-1.5-flash", "gemini-2.0-flash", "gemini-2.5-flash"]
+    # 1. LIVE GROQ CLOUD CALL
+    if GROQ_API_KEY and not GROQ_API_KEY.startswith("gsk_PASTE"):
+        url = "https://api.groq.com/openai/v1/chat/completions"
+        headers = {
+            "Authorization": f"Bearer {GROQ_API_KEY.strip()}",
+            "Content-Type": "application/json"
+        }
+        
+        models_to_try = ["llama-3.3-70b-versatile", "gemma2-9b-it"]
 
-    if client:
-        for m in active_models:
+        for m_id in models_to_try:
             try:
-                print(f"Calling Google GenAI [{m}]...")
-                response = client.models.generate_content(
-                    model=m,
-                    contents=prompt_text,
-                    config=types.GenerateContentConfig(
-                        system_instruction=system_instruction,
-                        temperature=0.6,
-                        max_output_tokens=500
-                    )
-                )
-                if response and response.text:
-                    print(f"✓ Google GenAI [{m}] responded successfully!")
-                    return {"response": response.text.strip()}
+                print(f"Connecting to Groq AI Cloud ({m_id})...")
+                body = {
+                    "model": m_id,
+                    "messages": [
+                        {"role": "system", "content": system_instruction},
+                        {"role": "user", "content": prompt_text}
+                    ],
+                    "temperature": 0.5,
+                    "max_tokens": 450
+                }
+                res = requests.post(url, json=body, headers=headers, timeout=8)
+                if res.status_code == 200:
+                    answer = res.json()['choices'][0]['message']['content']
+                    print(f"✓ Live Groq AI ({m_id}) responded in real-time!")
+                    return {"response": answer.strip()}
+                else:
+                    print(f"Model {m_id} returned {res.status_code}: {res.text[:80]}")
             except Exception as e:
-                print(f"Model [{m}] error: {e}")
+                print(f"Connection error on {m_id}: {e}")
 
-    # 2. Dynamic Smart Fallback (Echoes the user's exact item)
+    # 2. CALIBRATED MALAYSIAN HEURISTIC FALLBACK (Safe degradation)
     prompt_lower = prompt_text.lower()
-    
-    # Extract item name dynamically (e.g., "samsung s26", "macbook", etc.)
-    item_match = re.search(r'(?:buy|purchase|get|afford)\s+(?:a\s+|an\s+)?([a-zA-Z0-9\s]+?)(?:\?|$)', prompt_text, re.IGNORECASE)
-    item_name = item_match.group(1).strip() if item_match else "this device"
 
-    if any(k in prompt_lower for k in ['samsung', 'iphone', 'phone', 'macbook', 'laptop', 'ipad', 'gadget', 's26', 's25', 's24']):
-        est_price = 4999.0 if 'ultra' in prompt_lower else (4299.0 if ('plus' in prompt_lower or 'pro' in prompt_lower) else 3599.0)
-        epp_12 = est_price / 12
-        pct_income = (epp_12 / net_income) * 100
-
+    # Query Type A: Strategic Advice (Debt vs Invest)
+    if any(k in prompt_lower for k in ['debt', 'stashaway', 'clear', 'invest', 'priority', 'pay off']):
         return {
             "response": (
-                f"Financial Affordability Assessment for {item_name.title()} (~RM {est_price:,.2f}):\n\n"
-                f"Against your Net Monthly Take-Home Pay of RM {net_income:,.2f} and available wallet balance of RM {wallet_balance:,.2f}, "
-                f"paying upfront in cash would consume approximately {round((est_price / (wallet_balance or 1)) * 100)}% of your immediate liquid buffer. "
-                f"If you choose a 12-month 0% Easy Payment Plan (EPP), installments will be ~RM {epp_12:,.2f}/month ({pct_income:.1f}% of your salary).\n\n"
-                f"Under Bank Negara Malaysia guidelines, discretionary tech obligations under 10% of monthly income are financially sound, "
-                f"provided your 3-month emergency fund remains untouched."
+                f"Financial Strategy Assessment (Discretionary Debt vs. StashAway Portfolio):\n\n"
+                f"Under Bank Negara Malaysia financial health guidelines, high-interest discretionary debt (such as credit cards at 15%–18% p.a. or personal loans at 7%–10% p.a.) "
+                f"carries an effective cost that significantly exceeds the expected returns of equity robo-advisors (~8.2% p.a. on StashAway). "
+                f"Clearing high-cost debt provides a guaranteed, risk-free return equal to the interest saved and immediately lowers your Debt Service Ratio (DSR).\n\n"
+                f"Recommendation: Allocate your current monthly surplus of RM {max(0, net_income - 1500):,.2f} aggressively toward clearing high-cost obligations first. "
+                f"Once cleared, redirect those monthly cash flows directly into your StashAway and EPF i-Saraan allocations to accelerate compound wealth building."
             )
         }
 
-    if any(k in prompt_lower for k in ['car', 'vehicle', 'loan', 'myvi', 'civic', 'saga', 'proton', 'perodua', 'honda']):
-        numbers_found = re.findall(r'(\d+[\d,]*)', prompt_text.replace(',', ''))
-        loan_amount = float(numbers_found[0]) if numbers_found else 40000.0
+    # Query Type B: Vehicle Financing
+    if any(k in prompt_lower for k in [
+        'car', 'vehicle', 'loan', 'myvi', 'civic', 'saga', 'proton', 'perodua', 
+        'honda', 'toyota', 'hr-v', 'hrv', 'cr-v', 'crv', 'accord', 'camry', 
+        'vios', 'city', 'alza', 'yaris', 'axia', 'bezza', 'defender', 't2',
+        'mercedes', 'benz', 'amg', 'a45', 'a45s', 'c200', 'c300', 'bmw', 'audi', 'porsche'
+    ]):
+        explicit_cash = re.findall(r'(?:rm|myr|\$)\s*(\d+[\d,]*)', prompt_text, re.IGNORECASE)
+        
+        if explicit_cash:
+            loan_amount = float(explicit_cash[0].replace(',', ''))
+            vehicle_name = "Vehicle"
+        elif any(k in prompt_lower for k in ['a45', 'a45s', 'amg', 'c63', 'm3', 'm4', 'porsche', 'taycan']):
+            loan_amount = 510000.0
+            vehicle_name = "Mercedes-AMG A45S (High-Performance Hatchback)"
+        elif any(k in prompt_lower for k in ['mercedes', 'benz', 'c200', 'c300', 'bmw', '320i', '330i', 'audi', 'defender', 'harrier']):
+            loan_amount = 310000.0
+            vehicle_name = "Executive Continental Vehicle (Mercedes / BMW)"
+        elif any(k in prompt_lower for k in ['civic', 'accord', 'cr-v', 'crv', 'camry', 'cx-5', 'cx5', 't2', 'jetour']):
+            loan_amount = 135000.0
+            vehicle_name = "Honda Civic / C-Segment Vehicle"
+        elif any(k in prompt_lower for k in ['hr-v', 'hrv', 'corolla cross', 'cross', 'subaru xv']):
+            loan_amount = 115000.0
+            vehicle_name = "Honda HR-V (Compact SUV)"
+        elif any(k in prompt_lower for k in ['myvi', 'city', 'vios', 'alza', 'yaris']):
+            loan_amount = 65000.0
+            vehicle_name = "B-Segment Vehicle (e.g. Myvi / City / Vios)"
+        elif any(k in prompt_lower for k in ['saga', 'axia', 'bezza']):
+            loan_amount = 40000.0
+            vehicle_name = "Proton Saga / Entry Sedan"
+        else:
+            loan_amount = 75000.0
+            vehicle_name = "Automobile"
+
         dp = loan_amount * 0.10
         principal = loan_amount - dp
         interest = principal * 0.032 * 7
         monthly = (principal + interest) / (7 * 12)
         dsr = (monthly / net_income) * 100
 
+        status_text = (
+            "safely under the 30%–40% Debt Service Ratio (DSR) limit set by Bank Negara Malaysia"
+            if dsr <= 35 else
+            "substantially exceeding recommended Debt Service Ratio (DSR) limits (>35%). Committing to this will cause severe cash-flow strain under your current salary"
+        )
+
         return {
             "response": (
-                f"Evaluating vehicle financing for RM {loan_amount:,.2f} against your Net Salary of RM {net_income:,.2f}:\n\n"
+                f"Evaluating vehicle financing for {vehicle_name} (~RM {loan_amount:,.2f}) against your Net Salary of RM {net_income:,.2f}:\n\n"
                 f"With a standard 10% downpayment (RM {dp:,.2f}), financing RM {principal:,.2f} over 7 years at ~3.2% fixed interest results in an estimated installment of RM {monthly:,.2f}/month.\n\n"
-                f"This represents {dsr:.1f}% of your monthly income, which falls safely under the 30%–40% Debt Service Ratio (DSR) limit set by Bank Negara Malaysia. Factor in RM 300–RM 400 monthly for fuel, road tax, and motor insurance/takaful."
+                f"This represents {dsr:.1f}% of your monthly take-home pay, which is {status_text}. In addition to financing, note that running costs (fuel, comprehensive insurance, and maintenance) will require an additional RM 400–RM 1,200 monthly."
             )
         }
 
+    # Query Type C: Consoles & Tech Hardware
+    if any(k in prompt_lower for k in ['ps4', 'ps5', 'playstation', 'xbox', 'switch', 'nintendo']):
+        if 'ps4' in prompt_lower:
+            est_price = 1200.0
+            item_name = "PlayStation 4 Pro (Pre-Owned / Refurbished)"
+        elif 'ps5' in prompt_lower:
+            est_price = 2499.0
+            item_name = "PlayStation 5 (Slim / Digital)"
+        else:
+            est_price = 1500.0
+            item_name = "Gaming Console"
+    elif any(k in prompt_lower for k in ['iphone', 'apple', 'macbook', 'ipad']):
+        if 'pro max' in prompt_lower:
+            est_price = 6499.0
+            item_name = "iPhone Pro Max Flagship"
+        elif 'macbook' in prompt_lower:
+            est_price = 5499.0
+            item_name = "Apple MacBook"
+        else:
+            est_price = 4499.0
+            item_name = "Apple Device"
+    else:
+        item_match = re.search(r'(?:buy|purchase|get|afford)\s+(?:a\s+|an\s+)?([a-zA-Z0-9\s]+?)(?:\?|$)', prompt_text, re.IGNORECASE)
+        item_name = item_match.group(1).strip() if item_match else "this device"
+        est_price = 3299.0
+
+    epp_12 = est_price / 12
+    pct_income = (epp_12 / net_income) * 100
+    pct_wallet = round((est_price / (wallet_balance or 1)) * 100)
+
     return {
         "response": (
-            f"Evaluating against your Net Monthly Salary of RM {net_income:,.2f} and liquid reserve of RM {wallet_balance:,.2f}:\n\n"
-            f"For '{prompt_text}', verify that any associated ongoing commitments stay below 15% of your net monthly earnings. "
-            f"Preserve at least 3 to 6 months of essential living expenses in your cash reserve prior to entering into new recurring commitments."
+            f"Financial Affordability Assessment for {item_name.title()} (~RM {est_price:,.2f}):\n\n"
+            f"Against your Net Monthly Take-Home Pay of RM {net_income:,.2f} and available wallet balance of RM {wallet_balance:,.2f}, "
+            f"purchasing outright in cash consumes {pct_wallet}% of your immediate liquid buffer. "
+            f"If you choose a 12-month 0% Easy Payment Plan (EPP), installments will be ~RM {epp_12:,.2f}/month ({pct_income:.1f}% of your net pay).\n\n"
+            f"Under Bank Negara Malaysia guidelines, discretionary tech obligations under 10% of monthly income are financially sound, "
+            f"provided your 3-month emergency reserve remains fully intact."
         )
     }
 

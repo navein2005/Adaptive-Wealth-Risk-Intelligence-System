@@ -1659,7 +1659,7 @@ export default function App() {
                 <div>
                   <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
                     <Sparkles size={20} color="#2563EB" />
-                    <h3 style={{ fontSize: '18px', fontWeight: '800' }}>Gemini AI Wealth & Risk Advisor</h3>
+                    <h3 style={{ fontSize: '18px', fontWeight: '800' }}>AWRIS AI Wealth & Risk Advisor</h3>
                   </div>
                   <p style={{ fontSize: '13px', color: '#64748B' }}>Real-time generative intelligence derived from your active MySQL ledger</p>
                 </div>
@@ -1722,7 +1722,7 @@ export default function App() {
             <div style={{ backgroundColor: '#FFF', padding: '24px', borderRadius: '14px', border: '1px solid #E2E8F0' }}>
               <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '14px' }}>
                 <MessageSquare size={18} color="#2563EB" />
-                <h3 style={{ fontSize: '16px', fontWeight: '700' }}>Ask Gemini Financial Advisor</h3>
+                <h3 style={{ fontSize: '16px', fontWeight: '700' }}>Ask financial advisor</h3>
               </div>
               <form onSubmit={handleAskAdvisor} style={{ display: 'flex', gap: '10px', marginBottom: '16px' }}>
                 <input
