@@ -7,6 +7,7 @@ __pycache__/
 *.pyc
 venv/
 .env.local
+awris_ml_service/*.sqlite3
 
 # Build artifacts
 awris-frontend/build/

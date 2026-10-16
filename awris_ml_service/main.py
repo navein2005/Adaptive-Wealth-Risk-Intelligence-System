@@ -1,6 +1,12 @@
 import os
 import re
 import requests
+import asyncio
+import math
+import sqlite3
+from contextlib import closing
+from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
 from typing import List, Optional
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -16,7 +22,71 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-GROQ_API_KEY = os.getenv("GROQ_API_KEY", "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")
+GROQ_API_KEY = os.getenv("GROQ_API_KEY", "")
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
+GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
+PROVIDER_COOLDOWN_DB = os.getenv(
+    "PROVIDER_COOLDOWN_DB",
+    os.getenv(
+        "GROQ_COOLDOWN_DB",
+        os.path.join(os.path.dirname(__file__), "provider_cooldowns.sqlite3"),
+    ),
+)
+
+
+def _get_provider_cooldown_until(provider: str) -> float:
+    with closing(sqlite3.connect(PROVIDER_COOLDOWN_DB, timeout=5)) as connection:
+        with connection:
+            connection.execute(
+                "CREATE TABLE IF NOT EXISTS provider_cooldowns "
+                "(provider TEXT PRIMARY KEY, until_epoch REAL NOT NULL)"
+            )
+            row = connection.execute(
+                "SELECT until_epoch FROM provider_cooldowns WHERE provider = ?",
+                (provider,),
+            ).fetchone()
+    return row[0] if row else 0.0
+
+
+def _set_provider_cooldown_until(provider: str, until_epoch: float) -> None:
+    with closing(sqlite3.connect(PROVIDER_COOLDOWN_DB, timeout=5)) as connection:
+        with connection:
+            connection.execute(
+                "CREATE TABLE IF NOT EXISTS provider_cooldowns "
+                "(provider TEXT PRIMARY KEY, until_epoch REAL NOT NULL)"
+            )
+            connection.execute(
+                "INSERT INTO provider_cooldowns (provider, until_epoch) VALUES (?, ?) "
+                "ON CONFLICT(provider) DO UPDATE SET until_epoch = excluded.until_epoch",
+                (provider, until_epoch),
+            )
+
+
+def _clear_provider_cooldown(provider: str) -> None:
+    with closing(sqlite3.connect(PROVIDER_COOLDOWN_DB, timeout=5)) as connection:
+        with connection:
+            connection.execute(
+                "DELETE FROM provider_cooldowns WHERE provider = ?",
+                (provider,),
+            )
+
+
+def _retry_after_seconds(value: Optional[str]) -> float:
+    if value:
+        try:
+            seconds = float(value)
+            if math.isfinite(seconds):
+                return max(0.0, seconds)
+            return 60.0
+        except ValueError:
+            try:
+                retry_at = parsedate_to_datetime(value)
+                if retry_at.tzinfo is None:
+                    retry_at = retry_at.replace(tzinfo=timezone.utc)
+                return max(0.0, (retry_at - datetime.now(timezone.utc)).total_seconds())
+            except (TypeError, ValueError, OverflowError):
+                pass
+    return 60.0
 
 # ==================== DATA SCHEMAS ====================
 class TransactionItem(BaseModel):
@@ -199,7 +269,17 @@ async def chat_with_advisor(query: ChatQuery):
             "Content-Type": "application/json"
         }
         
-        models_to_try = ["llama-3.3-70b-versatile", "gemma2-9b-it"]
+        try:
+            cooldown_until = _get_provider_cooldown_until("groq")
+        except sqlite3.Error as e:
+            print(f"Unable to read shared Groq cooldown state; using the existing heuristic fallback: {e}")
+            models_to_try = []
+        else:
+            if datetime.now(timezone.utc).timestamp() < cooldown_until:
+                print("Groq rate-limit cooldown active; using the existing heuristic fallback.")
+                models_to_try = []
+            else:
+                models_to_try = ["llama-3.3-70b-versatile", "gemma2-9b-it"]
 
         for m_id in models_to_try:
             try:
@@ -213,17 +293,102 @@ async def chat_with_advisor(query: ChatQuery):
                     "temperature": 0.5,
                     "max_tokens": 450
                 }
-                res = requests.post(url, json=body, headers=headers, timeout=8)
+                res = await asyncio.to_thread(
+                    requests.post,
+                    url,
+                    json=body,
+                    headers=headers,
+                    timeout=8,
+                )
                 if res.status_code == 200:
                     answer = res.json()['choices'][0]['message']['content']
-                    print(f"✓ Live Groq AI ({m_id}) responded in real-time!")
+                    try:
+                        _clear_provider_cooldown("groq")
+                    except sqlite3.Error as e:
+                        print(f"Unable to clear shared Groq cooldown state: {e}")
+                    print(f"Live Groq AI ({m_id}) responded in real-time!")
                     return {"response": answer.strip()}
+                elif res.status_code == 429:
+                    retry_after = _retry_after_seconds(res.headers.get("Retry-After"))
+                    try:
+                        _set_provider_cooldown_until(
+                            "groq",
+                            datetime.now(timezone.utc).timestamp() + retry_after
+                        )
+                    except sqlite3.Error as e:
+                        print(f"Unable to save shared Groq cooldown state: {e}")
+                    print(f"Groq rate limit reached; pausing provider requests for {retry_after:.0f} seconds.")
+                    break
                 else:
                     print(f"Model {m_id} returned {res.status_code}: {res.text[:80]}")
             except Exception as e:
                 print(f"Connection error on {m_id}: {e}")
 
-    # 2. CALIBRATED MALAYSIAN HEURISTIC FALLBACK (Safe degradation)
+    # 2. GEMINI PROVIDER FALLBACK
+    if GEMINI_API_KEY:
+        try:
+            cooldown_until = _get_provider_cooldown_until("gemini")
+        except sqlite3.Error as e:
+            print(f"Unable to read shared Gemini cooldown state; skipping Gemini: {e}")
+        else:
+            if datetime.now(timezone.utc).timestamp() < cooldown_until:
+                print("Gemini rate-limit cooldown active; using the existing heuristic fallback.")
+            else:
+                gemini_url = (
+                    "https://generativelanguage.googleapis.com/v1beta/models/"
+                    f"{GEMINI_MODEL}:generateContent"
+                )
+                gemini_headers = {
+                    "x-goog-api-key": GEMINI_API_KEY,
+                    "Content-Type": "application/json",
+                }
+                gemini_body = {
+                    "systemInstruction": {"parts": [{"text": system_instruction}]},
+                    "contents": [{"role": "user", "parts": [{"text": prompt_text}]}],
+                    "generationConfig": {
+                        "temperature": 0.5,
+                        "maxOutputTokens": 450,
+                    },
+                }
+                try:
+                    print(f"Connecting to Gemini AI ({GEMINI_MODEL})...")
+                    res = await asyncio.to_thread(
+                        requests.post,
+                        gemini_url,
+                        json=gemini_body,
+                        headers=gemini_headers,
+                        timeout=8,
+                    )
+                    if res.status_code == 200:
+                        candidates = res.json().get("candidates") or []
+                        answer = "".join(
+                            part.get("text", "")
+                            for part in (candidates[0].get("content") or {}).get("parts", [])
+                        ).strip()
+                        if answer:
+                            try:
+                                _clear_provider_cooldown("gemini")
+                            except sqlite3.Error as e:
+                                print(f"Unable to clear shared Gemini cooldown state: {e}")
+                            print(f"Gemini AI ({GEMINI_MODEL}) responded in real-time!")
+                            return {"response": answer}
+                        print("Gemini returned no text; using the existing heuristic fallback.")
+                    elif res.status_code == 429:
+                        retry_after = _retry_after_seconds(res.headers.get("Retry-After"))
+                        try:
+                            _set_provider_cooldown_until(
+                                "gemini",
+                                datetime.now(timezone.utc).timestamp() + retry_after,
+                            )
+                        except sqlite3.Error as e:
+                            print(f"Unable to save shared Gemini cooldown state: {e}")
+                        print(f"Gemini rate limit reached; pausing requests for {retry_after:.0f} seconds.")
+                    else:
+                        print(f"Gemini returned status {res.status_code}; using the existing heuristic fallback.")
+                except (requests.RequestException, ValueError, TypeError, KeyError, IndexError) as e:
+                    print(f"Gemini connection error: {e}")
+
+    # 3. CALIBRATED MALAYSIAN HEURISTIC FALLBACK (Safe degradation)
     prompt_lower = prompt_text.lower()
 
     # Query Type A: Strategic Advice (Debt vs Invest)
